@@ -5,6 +5,8 @@ cmake-*
 .DS_Store
 build
 build-*
+.build/
+compile_commands.json
 
 bazel-*
 
