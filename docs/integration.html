@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Integration guide — pico-sdk</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<nav>
+  <a class="brand" href="index.html">pico<span>-sdk</span></a>
+  <span class="tag">C11 · buildcpp · RP2040</span>
+
+  <h4>platforms</h4>
+  <a href="platforms/rp2040.html">RP2040</a>
+  <a href="platforms/host.html">Host</a>
+
+  <h4>build</h4>
+  <a href="build/overview.html">build.cpp</a>
+  <a href="build/scope.html">Scope &amp; exclusions</a>
+
+  <h4>usage</h4>
+  <a class="here" href="integration.html">Integration guide</a>
+</nav>
+
+<main>
+
+<h1>Integration guide</h1>
+<p class="lede">How to use this SDK in your own Pico project, assuming your project also builds with <a href="https://github.com/RubenMovsesyan/buildcpp">buildcpp</a> rather than CMake or Bazel.</p>
+
+<div class="note warn">
+<strong>Current limitation</strong>
+<p>
+  This SDK builds to a plain static library — there's no linker script, no
+  <code>boot_stage2</code>, and no UF2 conversion step yet (see
+  <a href="build/scope.html">Scope &amp; exclusions</a> — <code>boot_stage2</code> and
+  the linker-script machinery are explicitly out of scope so far). You can compile and
+  link your application against the SDK and get a real linked ELF with resolved
+  symbols, which is a genuine correctness check, but turning that into something you
+  can flash onto a physical board isn't wired up yet.
+</p>
+</div>
+
+<h2 id="add">1. Add it as a submodule</h2>
+<pre><code>git submodule add git@github.com:RubenMovsesyan/pico-sdk.git external/pico-sdk
+git submodule add git@github.com:RubenMovsesyan/buildcpp.git external/buildcpp</code></pre>
+<p>
+  (Adjust paths to match your project's layout — this SDK's own fork lives at
+  <code>tools/external/pico-sdk</code> relative to <code>tools/buildcpp</code>, for
+  reference.)
+</p>
+
+<h2 id="build-it">2. Build the SDK</h2>
+<pre><code>cd external/pico-sdk
+clang++ -std=c++23 build.cpp -o build   # first time only — self-rebuilds after
+./build                                  # rp2040, static (what you want for firmware)</code></pre>
+<p>
+  This produces <code>external/pico-sdk/.build/rp2040/lib/libpico_sdk_rp2040.a</code>
+  plus the generated headers under
+  <code>external/pico-sdk/.build/rp2040/generated/pico_base/</code>.
+</p>
+
+<h2 id="wire-up">3. Wire it into your own <code>build.cpp</code></h2>
+<p>
+  Your project needs the same cross-compile flags as the SDK itself (they have to
+  match — different <code>--target</code>/<code>--sysroot</code>/<code>-march</code>
+  between your objects and the library you're linking against will not work), plus
+  <code>-I</code> for every SDK component header directory your code actually
+  <code>#include</code>s, plus a link against the built archive:
+</p>
+
+<pre><code>#include "../buildcpp/build.hpp"
+
+int main(int argc, char** argv) {
+    initLog(4096);
+
+    Build build(".build", "clang++", argc, argv);
+
+    BuildGroup&amp; app = build.addGroup();
+    app.setCompiler("clang");   // same reasoning as the SDK itself: `restrict` etc.
+                                  // break under clang++'s forced C++ mode
+
+    app.addCompileFlag("--target=armv6m-none-eabi");
+    app.addCompileFlag("-mfloat-abi=soft");
+    app.addCompileFlag("-march=armv6m");
+    app.addCompileFlag("--sysroot=/path/to/arm-gnu-toolchain/arm-none-eabi");
+
+    // Same defines the SDK itself was built with — see platforms/rp2040.html.
+    app.addCompileFlag("-DPICO_BOARD=\\\"pico\\\"");
+    app.addCompileFlag("-DPICO_RP2040=1");
+    app.addCompileFlag("-DPICO_32BIT=1");
+    app.addCompileFlag("-DPICO_ON_DEVICE=1");
+    app.addCompileFlag("-DPICO_NO_HARDWARE=0");
+    app.addCompileFlag("-DPICO_BUILD=1");
+
+    // Only the component include dirs your code actually uses — not the whole tree.
+    app.addInclude(Include&lt;Direct&gt;("external/pico-sdk/src/rp2_common/pico_stdlib/include"));
+    app.addInclude(Include&lt;Direct&gt;("external/pico-sdk/src/rp2_common/hardware_gpio/include"));
+    app.addInclude(Include&lt;Direct&gt;("external/pico-sdk/src/rp2_common/hardware_uart/include"));
+    app.addInclude(Include&lt;Direct&gt;("external/pico-sdk/src/common/pico_base_headers/include"));
+    app.addInclude(Include&lt;Direct&gt;("external/pico-sdk/src/boards/include"));
+    app.addInclude(Include&lt;Direct&gt;("external/pico-sdk/.build/rp2040/generated/pico_base"));
+    // ...and so on for every other component header dir you touch. There's no single
+    // umbrella include dir — each component publishes its own, same as the SDK's own
+    // build.cpp discovers them.
+
+    app.addLink(Link&lt;Path&gt;("pico_sdk_rp2040", "external/pico-sdk/.build/rp2040/lib"));
+
+    Task&amp; main_obj = app.addTask(Object("src/main.c"));
+    app.addTask(Binary("firmware"), {main_obj});
+
+    build.build();
+    return 0;
+}
+</code></pre>
+
+<h2 id="which-includes">Working out which include dirs you need</h2>
+<p>
+  There's no consolidated umbrella header. If you're not sure which component a given
+  <code>#include</code> lives under, grep the SDK for it:
+</p>
+<pre><code>grep -rl "gpio_put" external/pico-sdk/src/rp2_common/*/include</code></pre>
+<p>
+  or just look at <code>compile_commands.json</code> in
+  <code>external/pico-sdk/</code> after building it — every <code>-I</code> flag the
+  SDK's own build used is right there for any file you're pulling functions from.
+</p>
+
+<h2 id="host-too">Testing your app against host too</h2>
+<p>
+  If your app's logic doesn't depend on real peripheral behavior, you can build and run
+  it natively the same way: point your include dirs at
+  <code>external/pico-sdk/src/host/*/include</code> instead of
+  <code>rp2_common</code>/<code>rp2040</code>, drop every cross-compile flag (no
+  <code>--target</code>/<code>--sysroot</code>/<code>-march</code>), match the host
+  defines from <a href="platforms/host.html">Host</a>, and link against
+  <code>external/pico-sdk/.build/host/lib/libpico_sdk_host.a</code> instead. See
+  <a href="platforms/host.html">Host</a> for what is and isn't real in that build.
+</p>
+
+<footer>See also: <a href="build/overview.html">build.cpp</a>, <a href="build/scope.html">Scope &amp; exclusions</a></footer>
+
+</main>
+</div>
+</body>
+</html>

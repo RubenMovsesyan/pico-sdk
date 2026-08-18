@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Platform: rp2040 — pico-sdk</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<div class="wrap">
+
+<nav>
+  <a class="brand" href="../index.html">pico<span>-sdk</span></a>
+  <span class="tag">C11 · buildcpp · RP2040</span>
+
+  <h4>platforms</h4>
+  <a class="here" href="rp2040.html">RP2040</a>
+  <a href="host.html">Host</a>
+
+  <h4>build</h4>
+  <a href="../build/overview.html">build.cpp</a>
+  <a href="../build/scope.html">Scope &amp; exclusions</a>
+
+  <h4>usage</h4>
+  <a href="../integration.html">Integration guide</a>
+</nav>
+
+<main>
+
+<h1>Platform: <code>rp2040</code></h1>
+<p class="lede">Cross-compiled for real RP2040 hardware. Every peripheral register access is real. This is the target you flash to a board — once a linker script and UF2 step exist (not yet, see <a href="../integration.html">Integration guide</a>).</p>
+
+<h2>Role</h2>
+<p>
+  The default (and only, until <code>--platform host</code> is passed) target of
+  <code>./build</code>. Compiles <code>src/rp2_common</code> + <code>src/rp2040</code> +
+  <code>src/common</code> into <code>.build/rp2040/lib/libpico_sdk_rp2040.a</code> (or
+  <code>.dylib</code>/<code>.so</code> with <code>--link shared</code> — see the caveat
+  below).
+</p>
+
+<h2>Compiler configuration</h2>
+<pre><code>clang
+  --target=armv6m-none-eabi
+  -mfloat-abi=soft
+  -march=armv6m
+  --sysroot=/Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/arm-none-eabi
+
+  -DPICO_NO_HARDWARE=0
+  -DPICO_ON_DEVICE=1
+  -DPICO_BUILD=1
+  -DPICO_RP2040=1
+  -DPICO_32BIT=1
+  -DPICO_BOARD="pico"
+  -DPICO_THREAD_LOCAL_MODE_PER_THREAD=1</code></pre>
+<p>
+  Plain <code>clang</code>, not <code>clang++</code> — pico-sdk's C sources use
+  <code>restrict</code> and other C-only idioms that break under clang++'s forced C++
+  mode. This matches upstream's own toolchain file exactly
+  (<code>CMAKE_C_COMPILER=clang</code>, <code>CMAKE_CXX_COMPILER=clang++</code>).
+</p>
+
+<h2>Worth knowing</h2>
+<ul>
+  <li>
+    <strong>The ARM sysroot isn't part of any toolchain Xcode ships.</strong> Xcode's
+    bundled clang has no bare-metal ARM sysroot at all. The path above points at a
+    separately-installed <a href="https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads">ARM GNU
+    Toolchain</a> (newlib-based). If you're setting this up on a fresh machine, install
+    that toolchain first — building will fail on the first <code>&lt;string.h&gt;</code>
+    include otherwise.
+  </li>
+  <li>
+    <strong><code>--link shared</code> doesn't currently produce a working library.</strong>
+    Two independent problems: buildcpp's shared-link flag is chosen by host OS
+    (<code>-dynamiclib</code> on macOS), which is Mach-O-specific and wrong for an ELF
+    bare-metal target; and even correcting that, there's no <code>armv6m</code>
+    compiler-rt archive available in this toolchain to link against. More
+    fundamentally, Cortex-M0+ has no dynamic loader, so a traditionally-linked "shared
+    library" has no real runtime meaning on this target anyway — static is what an
+    embedded firmware library actually wants. <code>--link static</code> (the default)
+    is fully verified and works.
+  </li>
+  <li>
+    88 objects compile cleanly across every in-scope component — see
+    <a href="../build/scope.html">Scope &amp; exclusions</a> for exactly what's
+    included and what's deliberately left out (RP2350-only peripherals, RISC-V-only
+    code, submodule-dependent components).
+  </li>
+</ul>
+
+<footer>Source: <code>build.cpp</code> (rp2040 branch)</footer>
+
+</main>
+</div>
+</body>
+</html>

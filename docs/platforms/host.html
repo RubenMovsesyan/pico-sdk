@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Platform: host — pico-sdk</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<div class="wrap">
+
+<nav>
+  <a class="brand" href="../index.html">pico<span>-sdk</span></a>
+  <span class="tag">C11 · buildcpp · RP2040</span>
+
+  <h4>platforms</h4>
+  <a href="rp2040.html">RP2040</a>
+  <a class="here" href="host.html">Host</a>
+
+  <h4>build</h4>
+  <a href="../build/overview.html">build.cpp</a>
+  <a href="../build/scope.html">Scope &amp; exclusions</a>
+
+  <h4>usage</h4>
+  <a href="../integration.html">Integration guide</a>
+</nav>
+
+<main>
+
+<h1>Platform: <code>host</code></h1>
+<p class="lede">Native build for the machine you're building on. Same SDK API, but hardware-touching calls compile to no-ops instead of real register access. Write and test code against this, then switch to <code>--platform rp2040</code> once ready for real hardware.</p>
+
+<h2>Role</h2>
+<p>
+  <code>./build --platform host</code> compiles <code>src/host</code> +
+  <code>src/common</code> natively into
+  <code>.build/host/lib/libpico_sdk_host.a</code>. Unlike rp2040, this produces a
+  genuinely runnable executable when linked into an application — no bare-metal linker
+  script needed, it's just a normal native library.
+</p>
+
+<h2>Compiler configuration</h2>
+<pre><code>clang
+  -DPICO_NO_HARDWARE=1
+  -DPICO_ON_DEVICE=0
+  -DPICO_BUILD=1
+  -DPICO_HARDWARE_TIMER_RESOLUTION_US=1000
+  -DPICO_TIME_DEFAULT_ALARM_POOL_DISABLED=1
+  -DPICO_BOARD="pico"</code></pre>
+<p>
+  No <code>--target</code>, no <code>--sysroot</code>, no <code>-march</code> — this is
+  a native compile, not a cross-compile. No <code>PICO_RP2040</code> or
+  <code>PICO_32BIT</code> either; those gate rp2040-specific code paths that don't
+  exist under <code>src/host</code> at all.
+</p>
+
+<h2>What's real vs. stubbed</h2>
+
+<div class="scroll">
+<table>
+  <thead><tr><th>Component</th><th>Behavior on host</th></tr></thead>
+  <tbody>
+    <tr><td><code>hardware_gpio</code></td><td>Pure no-op. <code>gpio_get</code> is a hardcoded <code>return 0;</code>. <code>gpio_put</code> does nothing observable.</td></tr>
+    <tr><td><code>hardware_timer</code></td><td>Real. <code>sleep_ms</code>/<code>busy_wait_us</code> call the OS's actual <code>usleep()</code>/<code>gettimeofday()</code> — timing-dependent logic behaves close to real wall-clock time.</td></tr>
+    <tr><td><code>pico_multicore</code></td><td>Headers-only stub, no <code>.c</code> at all. <code>multicore_launch_core1()</code> etc. aren't implemented.</td></tr>
+    <tr><td>Everything else (<code>hardware_pio</code>, <code>hardware_adc</code>, <code>hardware_pwm</code>, <code>hardware_spi</code>, <code>hardware_i2c</code>, ...)</td><td>Doesn't exist under <code>src/host</code> at all — not stubbed, just absent. Code calling into these won't compile against the host library.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2>Worth knowing</h2>
+<ul>
+  <li>
+    <strong>This proves your logic compiles and runs, not that it works on hardware.</strong>
+    Anything depending on a hardware call's return value reflecting real electrical
+    state is meaningless here — there's no way to fake an input. Good for: state
+    machines, protocol parsing, algorithms, anything gated by elapsed time. Useless
+    for: anything that needs to observe a peripheral's actual behavior.
+  </li>
+  <li>
+    <code>src/host/boot_stage2.c</code> (a stray <code>int main() {}</code> sitting
+    directly under <code>src/host</code>, not part of any component) is explicitly
+    excluded — it isn't referenced by any of upstream's own <code>CMakeLists.txt</code>
+    either, dead code left over in the original repo.
+  </li>
+  <li>
+    Verified end-to-end: a trivial program calling <code>gpio_init</code>/
+    <code>gpio_put</code>/<code>gpio_get</code>/<code>sleep_ms</code> compiles, links,
+    and runs against this library, with <code>gpio_get</code> confirmed returning
+    <code>0</code> as expected.
+  </li>
+</ul>
+
+<footer>Source: <code>build.cpp</code> (host branch), <code>src/host/README.md</code></footer>
+
+</main>
+</div>
+</body>
+</html>

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pico-sdk — Documentation</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<nav>
+  <a class="brand" href="index.html">pico<span>-sdk</span></a>
+  <span class="tag">C11 · buildcpp · RP2040</span>
+
+  <h4>platforms</h4>
+  <a href="platforms/rp2040.html">RP2040</a>
+  <a href="platforms/host.html">Host</a>
+
+  <h4>build</h4>
+  <a href="build/overview.html">build.cpp</a>
+  <a href="build/scope.html">Scope &amp; exclusions</a>
+
+  <h4>usage</h4>
+  <a href="integration.html">Integration guide</a>
+</nav>
+
+<main>
+
+<h1>pico-sdk</h1>
+<p class="lede">
+  A fork of Raspberry Pi's pico-sdk with CMake and Bazel replaced by
+  <a href="https://github.com/RubenMovsesyan/buildcpp">buildcpp</a>. This page explains
+  how the fork is organized and how the build actually works; each topic has its own
+  page in the sidebar.
+</p>
+
+<h2 id="why">Why this exists</h2>
+<p>
+  Upstream pico-sdk ships ~150 <code>CMakeLists.txt</code> files plus a parallel Bazel
+  build. Neither is used here. <code>build.cpp</code> — a plain C++ program using
+  <code>buildcpp</code> — walks the source tree directly and compiles the SDK into a
+  single static (or shared) library per platform. All the CMake/Bazel plumbing has been
+  removed; the peripheral/runtime source code itself is untouched, straight from
+  upstream.
+</p>
+
+<h2 id="platforms">The two platforms</h2>
+
+<div class="box">
+  <div class="name">rp2040</div>
+  <div class="desc">
+    Cross-compiled for real hardware (<code>src/rp2_common</code> + <code>src/rp2040</code>
+    + <code>src/common</code>). Every hardware register access is real. This is what you
+    flash to a board. See <a href="platforms/rp2040.html">RP2040</a>.
+  </div>
+</div>
+<div class="box">
+  <div class="name">host</div>
+  <div class="desc">
+    Compiled natively for the machine you're building on (<code>src/host</code> +
+    <code>src/common</code>). Every hardware register access is a stub — <code>gpio_get</code>
+    always returns <code>0</code> — but timing (<code>sleep_ms</code>, <code>busy_wait_us</code>)
+    is real, backed by the OS clock. Good for testing logic that doesn't depend on real
+    peripheral state; useless for anything that does. See <a href="platforms/host.html">Host</a>.
+  </div>
+</div>
+
+<p>
+  These two are mutually exclusive within a single build: <code>src/host</code> and
+  <code>src/rp2_common</code> define the same function names (<code>gpio_set_function</code>,
+  etc.) with different bodies, so linking both into one library would collide. Pick one
+  via <code>--platform</code>; each gets its own build output directory
+  (<code>.build/rp2040/</code>, <code>.build/host/</code>) so switching between them never
+  reuses a stale, wrong-architecture object file.
+</p>
+
+<h2 id="build">Build system</h2>
+
+<p>
+  No CMake, no Bazel. <code>build.cpp</code> walks <code>src/</code> at build time,
+  collecting every component's <code>include/</code> directory and every
+  <code>.c</code>/<code>.S</code> file, minus a documented exclusion list (submodule
+  dependencies that aren't vendored here, RP2350/RISC-V-only peripherals, and the
+  "pico"-flavored default for components with multiple selectable implementations).
+  See <a href="build/overview.html">build.cpp</a> for how it works and
+  <a href="build/scope.html">Scope &amp; exclusions</a> for exactly what's in and why.
+</p>
+
+<pre><code>./build                    # rp2040, static (default)
+./build --platform host    # host, native, static
+./build --link shared      # rp2040, shared (see caveats on that page)
+</code></pre>
+
+<h2 id="using-it">Using pico-sdk in your own project</h2>
+<p>
+  If your own project also uses <code>buildcpp</code>, see the
+  <a href="integration.html">Integration guide</a> for how to add this repo as a
+  submodule and wire it into your <code>build.cpp</code>.
+</p>
+
+<h2 id="conventions">Conventions worth knowing</h2>
+
+<div class="scroll">
+<table>
+  <thead><tr><th>Convention</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td>Two generated headers (<code>pico/version.h</code>, <code>pico/config_autogen.h</code>) are written by <code>build.cpp</code> into <code>.build/&lt;platform&gt;/generated/pico_base/</code> before compiling.</td><td>Upstream CMake generates these at configure time; they don't exist as checked-in files.</td></tr>
+    <tr><td>Components with multiple selectable implementations (<code>pico_double</code>, <code>pico_float</code>, <code>pico_divider</code>, ...) get exactly one source set baked in — the "pico" (hardware-optimized) default.</td><td>Upstream defers the choice to a generator expression resolved per final executable; a single library needs one concrete answer.</td></tr>
+    <tr><td>Every excluded directory/file is named explicitly in <code>build.cpp</code> with a one-line reason in a comment.</td><td>So "why isn't X in the library" always has a documented answer — see <a href="build/scope.html">Scope &amp; exclusions</a>.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<footer>
+  pico-sdk (buildcpp fork) documentation · source of truth is <code>build.cpp</code>
+</footer>
+
+</main>
+</div>
+</body>
+</html>
