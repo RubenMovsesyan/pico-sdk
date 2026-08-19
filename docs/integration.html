@@ -30,16 +30,21 @@
 <h1>Integration guide</h1>
 <p class="lede">How to use this SDK in your own Pico project, assuming your project also builds with <a href="https://github.com/RubenMovsesyan/buildcpp">buildcpp</a> rather than CMake or Bazel.</p>
 
-<div class="note warn">
-<strong>Current limitation</strong>
+<div class="note">
+<strong>Flashable images are possible — from the consumer side</strong>
 <p>
-  This SDK builds to a plain static library — there's no linker script, no
-  <code>boot_stage2</code>, and no UF2 conversion step yet (see
-  <a href="build/scope.html">Scope &amp; exclusions</a> — <code>boot_stage2</code> and
-  the linker-script machinery are explicitly out of scope so far). You can compile and
-  link your application against the SDK and get a real linked ELF with resolved
-  symbols, which is a genuine correctness check, but turning that into something you
-  can flash onto a physical board isn't wired up yet.
+  This SDK builds to a plain static library — no linker script, no
+  <code>boot_stage2</code> build, no UF2 conversion inside this repo's own
+  <code>build.cpp</code> (see <a href="build/scope.html">Scope &amp; exclusions</a>).
+  That's deliberate: this repo's job is "compile the SDK as a library", not "produce
+  firmware". But everything a consumer needs to go the rest of the way is already
+  vendored in this tree — the real linker-script fragments
+  (<code>src/rp2_common/pico_standard_link/script_include/</code>,
+  <code>src/rp2040/pico_platform/</code>), the real boot2 sources and
+  <code>pad_checksum</code> tool (<code>src/rp2040/boot_stage2/</code>) — none of it
+  needs to be written from scratch. See <a href="#flashable">Producing a flashable
+  image</a> below for the three gotchas that aren't obvious from just reading the
+  source.
 </p>
 </div>
 
@@ -138,6 +143,116 @@ int main(int argc, char** argv) {
   defines from <a href="platforms/host.html">Host</a>, and link against
   <code>external/pico-sdk/.build/host/lib/libpico_sdk_host.a</code> instead. See
   <a href="platforms/host.html">Host</a> for what is and isn't real in that build.
+</p>
+
+<h2 id="flashable">Producing a flashable image</h2>
+<p>
+  Getting from "links against <code>libpico_sdk_rp2040.a</code>" to "runs when you
+  power on the board" needs three more pieces, none of which live in this repo's own
+  <code>build.cpp</code> — they're consumer-side, built directly from files already in
+  this tree. Verified end-to-end against a real Pico; each of the three failure modes
+  below was hit and diagnosed the hard way, so they're recorded here rather than
+  rediscovered next time.
+</p>
+
+<h3>1. Link the real linker-script chain — watch the <code>-L</code> order</h3>
+<p>
+  <code>src/rp2040/pico_platform/memmap_default.ld</code> is upstream's real,
+  usable entry point (just <code>INCLUDE "memmap_default.incl"</code>) — the whole
+  <code>.incl</code> chain under <code>src/rp2_common/pico_standard_link/script_include/</code>
+  and <code>src/rp2040/pico_platform/script_include/</code> uses ld's native
+  <code>INCLUDE "file"</code> directive, resolved via <code>-L</code> search paths, no
+  CMake templating required. Two gotchas:
+</p>
+<ul>
+  <li>
+    <code>set_memory_locations.incl</code> references <code>RAM_ORIGIN_DEFAULT</code>
+    etc. but nothing in the chain <code>INCLUDE</code>s the file that defines them
+    (<code>rp2040/pico_platform/script_include/default_locations.ld</code>) —
+    upstream's CMake passes it as a second <code>-T</code>/<code>--script=</code>
+    alongside the main one. Chain the two yourself (e.g. a two-line wrapper script
+    that <code>INCLUDE</code>s both by full path).
+  </li>
+  <li>
+    <strong><code>rp2040/pico_platform/script_include</code> must come before
+    <code>pico_standard_link/script_include</code> in <code>-L</code> order.</strong>
+    Both directories contain a file named <code>sections_default_text.incl</code> —
+    the <code>pico_standard_link</code> one is generic, the <code>rp2040</code> one
+    is an intentional override ("RP2040 binaries must begin with boot2"). ld resolves
+    a bare-filename <code>INCLUDE</code> via the first <code>-L</code> dir that has
+    it. Get the order backwards and the link still succeeds cleanly — but
+    <code>.boot2</code> ends up placed after <code>.text</code> instead of at flash
+    offset 0, where the bootrom unconditionally expects it. Verify placement with
+    <code>arm-none-eabi-objdump -h</code>, not by reading the script text.
+  </li>
+</ul>
+<p>
+  Also needs <code>pico_flash_region.ld</code> generated from
+  <code>pico_standard_link/pico_flash_region.template.ld</code> (substitute
+  <code>${PICO_FLASH_SIZE_BYTES_STRING}</code> — 2MB for Pico/Pico W) and, if
+  <code>hardware_psram</code> is in your include closure at all,
+  <code>pico_psram_region.ld</code> the same way from its own template (zero-length
+  is the correct stub when there's no PSRAM).
+</p>
+
+<h3>2. Force pico_runtime_init's object into the link</h3>
+<p>
+  <code>pico_runtime_init/runtime_init.c</code> registers every init step
+  (<code>runtime_init_early_resets</code> — which clears RESETS for
+  <code>IO_BANK0</code>/<code>PADS_BANK0</code>, without which GPIO writes are
+  silent no-ops — plus clocks, post-clock resets, spin locks, …) purely by placing a
+  function pointer in a <code>.preinit_array.&lt;priority&gt;</code> linker section.
+  Nothing calls them by name. Upstream's CMake builds this as an
+  <a href="https://raw.githubusercontent.com/raspberrypi/pico-sdk/master/src/rp2_common/pico_runtime_init/CMakeLists.txt">INTERFACE
+  library</a> — its sources compile directly into <em>your</em> target, so they're
+  never subject to lazy archive extraction. A single flat
+  <code>libpico_sdk_rp2040.a</code> doesn't have that property: normal archive
+  extraction only pulls a member when something references a symbol it defines, and
+  every function in <code>runtime_init.c</code> is <code>__weak</code> — a weak-only
+  match doesn't satisfy that rule either. Net effect: the object silently never gets
+  linked in, <code>runtime_init()</code>'s init-array is empty, and nothing looks
+  broken until you check with <code>arm-none-eabi-nm</code>/<code>objdump</code>.
+</p>
+<p>
+  Fix: force it with <code>-Wl,-u,runtime_init_install_ram_vector_table</code> — the
+  one non-<code>__weak</code> symbol in that file. Pulling it in via
+  <code>-u</code> (a real, strong-symbol match) brings every other registration in
+  the same translation unit along as a side effect, regardless of which symbol
+  triggered the extraction. (<code>--whole-archive</code> also "works" but pulls in
+  <code>pico_malloc</code>'s <code>__wrap_malloc</code>/etc too — an opt-in
+  heap-debugging feature normally enabled via CMake's <code>-Wl,--wrap=malloc</code>
+  — and fails to link on the missing <code>__real_*</code> symbols
+  <code>--wrap</code> would otherwise synthesize.)
+</p>
+
+<h3>3. boot2's checksum seed is <code>0xffffffff</code>, not <code>pad_checksum</code>'s default</h3>
+<p>
+  <code>src/rp2040/boot_stage2/pad_checksum ifile.bin ofile.S</code> defaults to
+  seed <code>0</code> when run bare. Upstream's
+  <a href="https://raw.githubusercontent.com/raspberrypi/pico-sdk/master/src/rp2040/boot_stage2/CMakeLists.txt">boot_stage2/CMakeLists.txt</a>
+  always invokes it as <code>pad_checksum -s 0xffffffff ...</code>. Different seed,
+  different checksum — and the RP2040 bootrom's own validation is a fixed algorithm
+  expecting the <code>0xffffffff</code>-seeded value specifically. Get this wrong and
+  the bootrom silently refuses to execute boot2 at all. This is the most dangerous
+  gotcha of the three: <strong>it looks identical to "nothing is flashed" or "the
+  board is dead"</strong> — no LED, no measurable power draw beyond the bootrom's own
+  idle polling — regardless of whether every other piece (linker script, boot2
+  placement, runtime_init) is already correct. If a build compiles, links, and
+  flashes via <code>picotool</code> without error but the board does
+  <em>nothing at all</em> on both a fresh flash and a real (non-BOOTSEL) power cycle,
+  check this first.
+</p>
+
+<h3>Flashing</h3>
+<p>
+  <code>picotool</code> (a real, standard <a href="https://github.com/raspberrypi/picotool">Raspberry
+  Pi tool</a>, not something built from this SDK) does the rest:
+  <code>picotool uf2 convert app.elf -t elf app.uf2 -t uf2</code> for a portable
+  drag-and-drop image, or <code>picotool load -x app.elf -t elf</code> to flash and
+  immediately run over USB while the board is in BOOTSEL mode — no manual UF2 step
+  needed for that path. <code>-x</code> performs a real bootrom reboot (the same
+  boot path as a cold power-on, not a debugger-style entry-point jump), so it's a
+  faithful test of the real boot sequence.
 </p>
 
 <footer>See also: <a href="build/overview.html">build.cpp</a>, <a href="build/scope.html">Scope &amp; exclusions</a></footer>
